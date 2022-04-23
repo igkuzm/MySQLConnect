@@ -2,7 +2,7 @@
  * File              : MySQLConnect.c
  * Author            : Igor V. Sementsov <ig.kuzm@gmail.com>
  * Date              : 06.09.2021
- * Last Modified Date: 19.03.2022
+ * Last Modified Date: 23.04.2022
  * Last Modified By  : Igor V. Sementsov <ig.kuzm@gmail.com>
  */
 
@@ -29,6 +29,8 @@
 	#include <mysql/mysql.h>
 #endif	
 
+#define ERROR(...) ({char ___err[BUFSIZ]; sprintf(___err, __VA_ARGS__); perror(___err);})
+
 const char*
 mysql_connect_print_client_version()
 {
@@ -36,37 +38,37 @@ mysql_connect_print_client_version()
 }
 
 int 
-mysql_connect_execute_function(const char *server, const char *user, const char *password, const char *String, const char *DataBase, void *data,  int (*callback)(void*,int*,int,char**,char**))
+mysql_connect_execute_function(const char *address, const char *user, const char *password, const char *database, const char *sql, void *user_data,  int (*callback)(void*,int,char**,char**))
 {
 	MYSQL *con = mysql_init(NULL); //init mysql
 
 	if (con == NULL){
-		fprintf(stderr, "ERROR. mysql_init() failed\n");
-		return 0;
+		ERROR("mysql_init() failed\n");
+		return -1;
 	}
 
 	mysql_options(con, MYSQL_SET_CHARSET_NAME, "utf8"); //set UTF8 to chars
 	mysql_options(con, MYSQL_INIT_COMMAND, "SET NAMES utf8");
 
-	if (mysql_real_connect(con, server, user, password, DataBase, 0, NULL, 0) == NULL) {//connect to MySQL database
-		fprintf(stderr, "ERROR. Cannot connect to SQL DataBase:%s\n", DataBase);
+	if (mysql_real_connect(con, address, user, password, database, 0, NULL, 0) == NULL) {//connect to MySQL database
+		ERROR("MySQL: cannot connect to  database '%s': %s\n", database, mysql_error(con));
 		mysql_close(con);
 		return 0;
 	}
 
 	//make SQL Query
-	int err = mysql_query(con, String);
-	if (err){
-		fprintf(stderr, "ERROR. Cannot make SQL Query: %s, with error: %d\n", String, err);
+	int res = mysql_query(con, sql);
+	if (res){
+		ERROR("MySQL: cannot make SQL Query '%s': %s\n", sql, mysql_error(con));
 		mysql_close(con);
-		return 0;
+		return res;
 	}
 
 
 	MYSQL_RES *result = mysql_store_result(con);
 
 	if (result == NULL){
-		fprintf(stderr, "ERROR. No data fetched from table\n");
+		ERROR("MySQL: no data fetched from table with SQL Query '%s'\n", sql);
 		mysql_close(con);
 		return 0;
 	}
@@ -77,30 +79,29 @@ mysql_connect_execute_function(const char *server, const char *user, const char 
 	MYSQL_ROW row;
 	MYSQL_FIELD *field;
 
-	char *headers[num_fields];
+	char *titles[num_fields];
 	for (i=0; (field=mysql_fetch_field(result)); i++){
-		headers[i] = field->name;
+		titles[i] = field->name;
 	}
 	
-	int count = 0;
 	while ((row = mysql_fetch_row(result))){
 		if (callback) {
-			int c = callback((void*)data, &count, num_fields, row, headers);
+			int c = callback(user_data, num_fields, row, titles);
 			if (c) { //callback return non zero
-				fprintf(stderr, "MySQLExecute interupted with code: %d", c);
+				ERROR("MySQLExecute interupted with code: %d", c);
 				break;
 			}
 		}
-		count++;
 	}
 
 	mysql_free_result(result);
 	mysql_close(con);
-	return count;
+
+	return 0;
 }
 
 int 
-mysql_connect_callback_print(void *data, int *count, int argc, char **argv, char **columnName)
+mysql_connect_callback_print(void *data, int argc, char **argv, char **columnName)
 {
     int i;
 	for (i=0; i< argc; i++)
@@ -115,26 +116,23 @@ mysql_connect_callback_print(void *data, int *count, int argc, char **argv, char
 }
 
 int 
-mysql_connect_execute(const char *address, const char *user, const char *password, const char *SQL_string, const char *DataBase)
+mysql_connect_execute(const char *address, const char *user, const char *password, const char *database, const char *sql)
 {
-	return mysql_connect_execute_function(address, user, password, SQL_string, DataBase, NULL, mysql_connect_callback_print);
+	return mysql_connect_execute_function(address, user, password, database, sql, NULL, mysql_connect_callback_print);
 }
 
 bool 
-mysql_connect_connection_to_base_is_valid(const char *server, const char *user, const char *password, const char *DataBase)
+mysql_connect_connection_to_base_is_valid(const char *server, const char *user, const char *password, const char *database)
 {
 	MYSQL *con = mysql_init(NULL); //init mysql
 
 	if (con == NULL){
-		fprintf(stderr, "ERROR. mysql_init() failed\n");
+		ERROR("mysql_init() failed\n");
 		return false;
 	}
 
-	mysql_options(con, MYSQL_SET_CHARSET_NAME, "utf8"); //set UTF8 to chars
-	mysql_options(con, MYSQL_INIT_COMMAND, "SET NAMES utf8");
-
-	if (mysql_real_connect(con, server, user, password, DataBase, 0, NULL, 0) == NULL) {//connect to MySQL database
-		fprintf(stderr, "ERROR. Cannot connect to SQL DataBase:%s\n", DataBase);
+	if (mysql_real_connect(con, server, user, password, database, 0, NULL, 0) == NULL) {//connect to MySQL database
+		ERROR("MySQL: cannot connect to  database '%s': %s\n", database, mysql_error(con));
 		mysql_close(con);
 		return false;
 	}
@@ -145,28 +143,20 @@ mysql_connect_connection_to_base_is_valid(const char *server, const char *user, 
 
 
 int 
-mysql_connect_get_string_callback(void *data, int *count, int argc, char **argv, char **columnNames)
+mysql_connect_get_string_callback(void *data, int argc, char **argv, char **titles)
 {
 	char *string=(char*)data;
 	strcpy(string, "");		
 	if (argv[0]!=NULL){
-		char buf[BUFSIZ];		
-		strncpy(buf, (const char*)argv[0], sizeof(buf) - 1); //save copy string
-		buf[sizeof(buf) - 1] = '\0';
-		strcpy(string, buf);
+		strncpy(string, (const char*)argv[0], BUFSIZ - 1); //save copy string
+		string[BUFSIZ - 1] = '\0';
 	}	
     return 1; //do not call callback again
 }
 
-char *
-mysql_connect_get_string(const char *server, const char *user, const char *password, const char *SQL, const char *DataBase)
+int
+mysql_connect_get_string(const char *server, const char *user, const char *password, const char *database, const char *sql, char * string)
 {
-	char *string = calloc(BUFSIZ, sizeof(char));
-	if (!string) {
-		fprintf(stderr, "ERROR. Cannot allocate memory\n");		
-		exit(EXIT_FAILURE);
-	}
-	mysql_connect_execute_function(server, user, password, SQL, DataBase, string, mysql_connect_get_string_callback);	
-	return string;
+	return mysql_connect_execute_function(server, user, password, database, sql, string, mysql_connect_get_string_callback);	
 }
 
